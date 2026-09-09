@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "doppelhand"
+version = "1.0.0"
+description = "Windows agent that reads the screen and drives the mouse and keyboard like a person would"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Shanewas Ahmed", email = "shanewasahmed@gmail.com" }]
+keywords = ["windows", "automation", "computer-use", "screenshot", "agent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Desktop Environment",
+]
+dependencies = [
+    "anthropic>=0.70",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.urls]
+Homepage = "https://github.com/shanewas/doppelhand"
+Issues = "https://github.com/shanewas/doppelhand/issues"
+
+[project.scripts]
+doppelhand = "doppelhand.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["doppelhand"]
