@@ -58,6 +58,9 @@ BGRA_FORMATS = {87, 88}  # B8G8R8A8_UNORM, B8G8R8X8_UNORM
 #: cached to fall back on. An idle display can take a moment to present one.
 PRIME_TIMEOUT_MS = 500
 
+#: DXGI_MODE_ROTATION values meaning the display is not turned: unspecified, identity.
+UPRIGHT = {0, 1}
+
 
 class GUID(ctypes.Structure):
     _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
@@ -251,6 +254,13 @@ class Duplicator:
             if get_desc(output, ctypes.byref(desc)) == S_OK:
                 area = desc.DesktopCoordinates
                 if (area.left, area.top, area.right, area.bottom) == wanted:
+                    if desc.Rotation not in UPRIGHT:
+                        # A rotated display is duplicated in its native orientation, so
+                        # the frame would come back sideways against a desktop rectangle
+                        # that is not. Leaving it to GDI keeps the pixels and the
+                        # coordinates agreeing with each other.
+                        _release(output)
+                        raise ActionError(f"monitor {self.monitor.index} is rotated")
                     return output
             _release(output)
             index += 1

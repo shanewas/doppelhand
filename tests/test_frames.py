@@ -90,25 +90,22 @@ def test_the_frame_source_gives_up_on_a_display_that_keeps_failing():
     """One refusal must not cost a capture on every later screenshot."""
     from doppelhand.duplication import FrameSource
 
-    class AlwaysRefuses(FrameSource):
-        def __init__(self):
-            super().__init__()
-            self.attempts = 0
-
-        def _open_for(self, monitor):
-            self.attempts += 1
-            raise ActionError("no")
-
-    source = AlwaysRefuses()
-    monitor = three_monitors()[0]
-    # Patch the constructor path the real source uses.
     import doppelhand.duplication as duplication
 
+    source = FrameSource()
+    monitor = three_monitors()[0]
+    attempts = []
+
+    def refuse(_monitor):
+        attempts.append(_monitor.index)
+        raise ActionError("refused")
+
     original = duplication.Duplicator
-    duplication.Duplicator = lambda m: (_ for _ in ()).throw(ActionError("refused"))
+    duplication.Duplicator = refuse
     try:
         assert source.frame(monitor) is None
         assert source.frame(monitor) is None
+        assert attempts == [monitor.index], "a refused display was tried twice"
         assert monitor.index in source._refused
     finally:
         duplication.Duplicator = original

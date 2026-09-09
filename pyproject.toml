@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "doppelhand"
-version = "1.3.0"
+version = "1.3.1"
 description = "Windows agent that reads the screen and drives the mouse and keyboard like a person would"
 readme = "README.md"
 license = "MIT"
@@ -14,18 +14,25 @@ keywords = ["windows", "automation", "computer-use", "screenshot", "agent"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
+    "Environment :: Win32 (MS Windows)",
     "Intended Audience :: Developers",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Desktop Environment",
 ]
 dependencies = [
-    "anthropic>=0.70",
     "pillow>=10",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# Only `doppelhand run` talks to an API. Everything else drives the desktop locally, so
+# the SDK stays off installs that will never use it.
+run = ["anthropic>=0.124"]
+dev = ["pytest>=8", "anthropic>=0.124"]
 
 [project.urls]
 Homepage = "https://github.com/shanewas/doppelhand"

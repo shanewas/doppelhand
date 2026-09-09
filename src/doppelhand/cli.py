@@ -355,7 +355,12 @@ def cmd_install_skill(args) -> int:
 
 
 def cmd_run(args) -> int:
-    import anthropic
+    try:
+        import anthropic
+    except ImportError:
+        print("doppelhand: this command needs the Anthropic SDK. "
+              "Install it with: pip install doppelhand[run]", file=sys.stderr)
+        return 1
 
     from doppelhand import screen
     from doppelhand.agent import DEFAULT_MODEL, Agent

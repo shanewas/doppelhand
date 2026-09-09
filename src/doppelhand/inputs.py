@@ -246,8 +246,9 @@ def cursor_position() -> tuple[int, int]:
 
 
 def move(x: int, y: int) -> None:
-    # ponytail: SetCursorPos lands on the exact pixel; switch to absolute SendInput
-    # moves if a target application ignores it (some full-screen games do).
+    # SetCursorPos lands on the exact pixel. Applications that read raw input rather
+    # than the cursor position, full-screen games mostly, will need absolute SendInput
+    # moves instead.
     if not _user32.SetCursorPos(int(x), int(y)):
         from doppelhand.screen import attach_input_desktop
         attach_input_desktop()

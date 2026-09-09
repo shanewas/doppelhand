@@ -120,4 +120,4 @@ so leave it running for the whole session and stop it with
 
 ## Installing
 
-`pip install git+https://github.com/shanewas/doppelhand`, then `doppelhand screen` to check it works. Windows only.
+`pip install doppelhand`, then `doppelhand screen` to check it works. Windows only.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.1 — 2026-09-09
+
+First release on PyPI: `pip install doppelhand`.
+
+- The Anthropic SDK is no longer installed by default. Only `doppelhand run` talks to an API, so it moved to an extra: `pip install "doppelhand[run]"`. Running it without the SDK now says so instead of raising an import error. The floor is `anthropic>=0.124`, the first version carrying the computer-toolset types.
+- A rotated display falls back to GDI capture. Desktop Duplication hands over the frame in the screen's native orientation, so a portrait monitor would have produced a sideways image whose coordinates disagreed with the desktop rectangle.
+- The source archive now carries the whole test suite, the benchmark and the changelog, so a clean checkout can run what the repository runs.
+- The warning about driving the real mouse and keyboard sits under Install, where someone arriving from the package page will see it.
+
 ## 1.3.0 — 2026-09-09
 
 Built for driving a desktop in real time. An action costs about 6ms instead of 300, and a screenshot about 30ms instead of 400.

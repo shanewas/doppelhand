@@ -7,12 +7,16 @@ Use it two ways. Give an AI agent you already have eyes and hands, so it looks a
 ## Install
 
 ```
-pip install git+https://github.com/shanewas/doppelhand
+pip install doppelhand
 ```
 
-Not on PyPI yet.
+Windows only, Python 3.10 or newer. Pillow is the only dependency; screen capture and
+input go straight through the Win32 API.
 
-Windows only, Python 3.10 or newer. The only dependencies are the Anthropic SDK and Pillow; screen capture and input go straight through the Win32 API.
+**This program moves your real mouse and types on your real keyboard.** It can click
+anything you can click. Run it on a machine where that is acceptable and watch what it
+does. `doppelhand run` waits for confirmation and stops when you hold Escape; the
+single-action commands do what they are told, immediately.
 
 ## Give your agent hands
 
@@ -38,7 +42,7 @@ $ doppelhand click 640,360
 {"ok": true, "action": "left_click", "at": [640, 360]}
 ```
 
-| Command | |
+| Command | What it does |
 |---|---|
 | `shot [PATH] [--region X,Y,W,H] [--monitor N]` | capture, write a PNG, report the coordinate space |
 | `screen` | list the displays and report the coordinate space |
@@ -95,12 +99,17 @@ request that carries browser headers or names a host other than loopback.
 
 ## Or let it drive itself
 
-This is the only path that calls the Anthropic API, and the only one that needs a key.
+This is the only path that calls the Anthropic API, the only one that needs a key, and
+the only one that needs the SDK:
 
 ```
+pip install "doppelhand[run]"
 export ANTHROPIC_API_KEY=sk-ant-...
 doppelhand run "open the calculator and work out 19% of 4,320"
 ```
+
+This loop is covered by tests against a scripted client rather than a recorded live run,
+so treat it as the least proven part of the package.
 
 `run` prints what it is about to do and waits for confirmation. **Hold Escape at any point to stop the run** — the key is checked before every action.
 
@@ -122,29 +131,28 @@ print(Agent(max_steps=10).run("close the notification in the corner"))
 
 ## How it works
 
-1. `screen.py` captures the primary display through GDI `BitBlt` and hands back a Pillow image.
+1. `screen.py` captures a display, through GDI for a one-shot command or through DXGI Desktop Duplication when the server is holding one open, and hands back a Pillow image.
 2. `executor.py` shrinks that image to a 1280-pixel long edge, and scales every coordinate the model returns back up to real pixels.
 3. `inputs.py` drives the mouse and keyboard with `SendInput`. Text is typed as Unicode, so it does not depend on the active keyboard layout.
 4. `cli.py` exposes each of those actions as a command, or `agent.py` runs the whole loop against Claude: send the screen, execute the actions in the reply, send the result, repeat.
 
 In the built-in loop, costs are kept down two ways: one prompt-cache breakpoint moves along with the newest tool result, and screenshots older than the last ten are dropped from the history in batches.
 
-## Limits in 1.2.0
+## Limits
 
 - Actions are run against a display as a whole; there is no per-window targeting.
 - Displays are addressed one at a time. `--monitor all` captures them together but scales the result down too far to read.
+- A rotated display falls back to the slower GDI capture, because a duplicated frame arrives in the screen's unrotated orientation.
+- Windows blocks synthetic input to windows running as administrator, so a click on one does nothing.
 - The Escape stop applies to `run`, which checks it before each action. Single commands have already finished by the time you could press anything.
 - The built-in loop is covered by tests against a scripted client, not by a recorded live run.
-
-## Safety
-
-This program moves your real mouse and types on your real keyboard. It can click anything you can click. Run it on a machine where that is acceptable, watch what it does, and keep a hand near Escape.
 
 ## Development
 
 ```
 pip install -e ".[dev]"
 pytest tests -q
+python bench/benchmark.py
 ```
 
 ## License
