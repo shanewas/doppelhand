@@ -1,13 +1,22 @@
-"""Command line entry point."""
+"""Command line entry point.
+
+Two audiences share it. The action commands print one JSON object each and are meant to
+be driven by another agent, which supplies the judgement between them. `run` is the
+standalone path, where doppelhand asks Claude what to do next itself.
+"""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
-from doppelhand import __version__
+from doppelhand import __version__, session, skills
 from doppelhand.errors import Aborted, DoppelhandError, Refused, StepLimit
 from doppelhand.executor import DEFAULT_MAX_EDGE, Executor, fit
+
+SPACES = ("view", "display")
 
 
 def _use_utf8() -> None:
@@ -18,6 +27,24 @@ def _use_utf8() -> None:
             stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+def coordinate(text: str) -> tuple[int, int]:
+    try:
+        x, y = (part.strip() for part in text.split(","))
+        return int(x), int(y)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected X,Y but got {text!r}") from None
+
+
+def region(text: str) -> tuple[int, int, int, int]:
+    try:
+        left, top, width, height = (int(part.strip()) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected X,Y,W,H but got {text!r}") from None
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(f"region has no area: {width}x{height}")
+    return left, top, width, height
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="doppelhand",
@@ -26,7 +53,57 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"doppelhand {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run = commands.add_parser("run", help="carry out a task on this desktop")
+    def action(name: str, help_text: str) -> argparse.ArgumentParser:
+        sub = commands.add_parser(name, help=help_text)
+        sub.add_argument("--space", choices=SPACES, default="view",
+                         help="coordinate space of the arguments (default: view)")
+        sub.add_argument("--max-edge", type=int, default=None,
+                         help="long edge of the view space (default: the last shot's)")
+        return sub
+
+    shot = action("shot", "capture the screen to a PNG")
+    shot.add_argument("out", nargs="?", default=None, help="where to write the PNG")
+    shot.add_argument("--region", type=region, default=None,
+                      help="capture X,Y,W,H instead of the whole display")
+
+    action("screen", "report the coordinate space without capturing")
+    action("cursor", "report where the pointer is")
+
+    click = action("click", "click at a point")
+    click.add_argument("at", type=coordinate)
+    click.add_argument("--button", choices=("left", "right", "middle"), default="left")
+    click.add_argument("--count", type=int, default=1, help="2 double clicks, 3 selects a line")
+    click.add_argument("--modifiers", default=None, help="keys to hold, e.g. ctrl+shift")
+
+    move = action("move", "move the pointer without clicking")
+    move.add_argument("at", type=coordinate)
+
+    drag = action("drag", "press, drag and release")
+    drag.add_argument("start", type=coordinate)
+    drag.add_argument("end", type=coordinate)
+    drag.add_argument("--modifiers", default=None)
+
+    scroll = action("scroll", "scroll the surface under the pointer")
+    scroll.add_argument("direction", choices=("up", "down", "left", "right"))
+    scroll.add_argument("amount", nargs="?", type=int, default=3)
+    scroll.add_argument("--at", type=coordinate, default=None)
+    scroll.add_argument("--modifiers", default=None)
+
+    type_text = action("type", "type literal text at the keyboard focus")
+    type_text.add_argument("text")
+
+    key = action("key", "press a key or combination, e.g. ctrl+s")
+    key.add_argument("combo")
+    key.add_argument("--repeat", type=int, default=1)
+
+    hold = action("hold", "hold a key down")
+    hold.add_argument("combo")
+    hold.add_argument("seconds", type=float)
+
+    wait = action("wait", "pause and let the screen settle")
+    wait.add_argument("seconds", type=float)
+
+    run = commands.add_parser("run", help="carry out a whole task with Claude driving")
     run.add_argument("task", help="what to do, in plain language")
     run.add_argument("--model", default=None, help="Claude model to drive the run")
     run.add_argument("--max-steps", type=int, default=30, help="model turns before giving up")
@@ -35,23 +112,167 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
     run.add_argument("-q", "--quiet", action="store_true", help="only print the final answer")
 
-    shot = commands.add_parser("shot", help="save a screenshot and exit")
-    shot.add_argument("path", nargs="?", default="screenshot.png")
-    shot.add_argument("--max-edge", type=int, default=DEFAULT_MAX_EDGE)
-    shot.add_argument("--full", action="store_true", help="save at the display's own size")
+    install = commands.add_parser("install-skill",
+                                  help="install the agent skill into a harness")
+    install.add_argument("target", nargs="?", choices=sorted(skills.TARGETS), default=None)
+    install.add_argument("--dest", default=None, help="install into this directory instead")
+    install.add_argument("--print", dest="show", action="store_true",
+                         help="write the skill to stdout instead of installing it")
+    install.add_argument("--force", action="store_true", help="replace an existing skill")
     return parser
 
 
-def cmd_shot(args) -> int:
+def _executor(args) -> Executor:
+    """Build the executor whose view space the arguments are written in.
+
+    `--space display` is the same thing with the scale pinned to 1, so there is one
+    coordinate path rather than two.
+    """
     from doppelhand import screen
 
-    image = screen.grab()
-    if not args.full:
-        image = fit(image, args.max_edge)
-    image.save(args.path)
-    display_width, display_height = screen.screen_size()
-    print(f"{args.path}  {image.width}x{image.height}  "
-          f"(display {display_width}x{display_height})")
+    display = screen.screen_size()
+    if getattr(args, "space", "view") == "display":
+        return Executor(max_edge=max(display))
+    return Executor(max_edge=args.max_edge or session.recall_max_edge(display))
+
+
+def _space(executor: Executor, args) -> dict:
+    return {
+        "view": list(executor.view_size),
+        "display": list(executor.screen_size),
+        "scale": round(executor.scale, 6),
+        "space": getattr(args, "space", "view"),
+    }
+
+
+def cmd_shot(args, executor: Executor) -> dict:
+    from doppelhand import screen
+
+    out = Path(args.out or (session.state_dir() / "shot.png"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.region:
+        image = fit(screen.grab(_crop_box(executor, args.region)), executor.max_edge)
+    else:
+        image = fit(screen.grab(), executor.max_edge)
+    image.save(out)
+
+    payload = {"path": str(out), **_space(executor, args)}
+    if args.region:
+        # A crop has its own origin, so points read off it are not screen points.
+        payload["region"] = list(args.region)
+        payload["space"] = "region"
+        payload["note"] = "read this image, do not take click coordinates from it"
+    else:
+        # The PNG is already on disk, so a failure to note the space cannot make this
+        # a failed capture. It costs the caller a --max-edge flag on the next command.
+        payload["space_remembered"] = session.remember(executor.max_edge,
+                                                       executor.screen_size)
+    payload["image"] = list(image.size)
+    return payload
+
+
+def _crop_box(executor: Executor, wanted: tuple[int, int, int, int]) -> tuple[int, ...]:
+    """Turn a region in the caller's space into a physical box, refusing one that misses
+    the screen rather than clamping it into a stripe of pixels from the wrong place."""
+    left, top, width, height = wanted
+    view_width, view_height = executor.view_size
+    if left >= view_width or top >= view_height or left + width <= 0 or top + height <= 0:
+        raise DoppelhandError(
+            f"region {list(wanted)} lies outside the {view_width}x{view_height} view")
+    x0, y0 = executor.to_physical(left, top)
+    x1, y1 = executor.to_physical(left + width, top + height)
+    return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
+
+
+def cmd_screen(args, executor: Executor) -> dict:
+    return _space(executor, args)
+
+
+def cmd_cursor(args, executor: Executor) -> dict:
+    from doppelhand import inputs
+
+    physical = inputs.cursor_position()
+    return {"view": list(executor.to_view(*physical)), "display": list(physical),
+            "scale": round(executor.scale, 6)}
+
+
+def cmd_click(args, executor: Executor) -> dict:
+    if args.count == 1:
+        member = f"{args.button}_click"
+    elif args.count in (2, 3):
+        if args.button != "left":
+            raise DoppelhandError("only the left button has a double or triple click")
+        member = "double_click" if args.count == 2 else "triple_click"
+    else:
+        raise DoppelhandError(f"count must be 1, 2 or 3, got {args.count}")
+    executor.dispatch(member, {"coordinate": list(args.at), "text": args.modifiers})
+    return {"action": member, "at": list(args.at)}
+
+
+def cmd_move(args, executor: Executor) -> dict:
+    executor.dispatch("mouse_move", {"coordinate": list(args.at)})
+    return {"action": "mouse_move", "at": list(args.at)}
+
+
+def cmd_drag(args, executor: Executor) -> dict:
+    executor.dispatch("left_click_drag", {"start_coordinate": list(args.start),
+                                          "coordinate": list(args.end),
+                                          "text": args.modifiers})
+    return {"action": "left_click_drag", "from": list(args.start), "to": list(args.end)}
+
+
+def cmd_scroll(args, executor: Executor) -> dict:
+    if args.amount < 1:
+        # A negative amount reverses the wheel, which would contradict the direction
+        # this command reports back.
+        raise DoppelhandError(f"amount must be 1 or more, got {args.amount}")
+    params = {"scroll_direction": args.direction, "scroll_amount": args.amount,
+              "text": args.modifiers}
+    if args.at:
+        params["coordinate"] = list(args.at)
+    executor.dispatch("scroll", params)
+    return {"action": "scroll", "direction": args.direction, "amount": args.amount}
+
+
+def cmd_type(args, executor: Executor) -> dict:
+    executor.dispatch("type", {"text": args.text})
+    return {"action": "type", "characters": len(args.text)}
+
+
+def cmd_key(args, executor: Executor) -> dict:
+    repeat = min(100, max(1, args.repeat))  # the toolset's own ceiling
+    executor.dispatch("key", {"text": args.combo, "repeat": repeat})
+    return {"action": "key", "combo": args.combo, "repeat": repeat}
+
+
+def cmd_hold(args, executor: Executor) -> dict:
+    executor.dispatch("hold_key", {"text": args.combo, "duration": args.seconds})
+    return {"action": "hold_key", "combo": args.combo, "seconds": args.seconds}
+
+
+def cmd_wait(args, executor: Executor) -> dict:
+    executor.dispatch("wait", {"duration": args.seconds})
+    return {"action": "wait", "seconds": args.seconds}
+
+
+ACTIONS = {
+    "shot": cmd_shot, "screen": cmd_screen, "cursor": cmd_cursor, "click": cmd_click,
+    "move": cmd_move, "drag": cmd_drag, "scroll": cmd_scroll, "type": cmd_type,
+    "key": cmd_key, "hold": cmd_hold, "wait": cmd_wait,
+}
+
+
+def cmd_install_skill(args) -> int:
+    if args.show:
+        print(skills.skill_text())
+        return 0
+    if not args.target and not args.dest:
+        print(json.dumps({"ok": False, "error": "name a harness or pass --dest",
+                          "known": sorted(skills.TARGETS)}))
+        return 1
+    path = skills.install(args.target, args.dest, args.force)
+    print(json.dumps({"ok": True, "installed": str(path), "harness": args.target}))
     return 0
 
 
@@ -123,9 +344,21 @@ def _confirm(executor: Executor, model: str, args) -> bool:
 def main(argv: list[str] | None = None) -> int:
     _use_utf8()
     args = build_parser().parse_args(argv)
-    if args.command == "shot":
-        return cmd_shot(args)
-    return cmd_run(args)
+
+    if args.command == "run":
+        return cmd_run(args)
+    try:
+        if args.command == "install-skill":
+            return cmd_install_skill(args)
+        payload = ACTIONS[args.command](args, _executor(args))
+    except DoppelhandError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
+    except OSError as exc:
+        print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
+        return 1
+    print(json.dumps({"ok": True, **payload}))
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover

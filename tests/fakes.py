@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+from doppelhand import inputs
+
 
 class FakeScreen:
     def __init__(self, size=(1920, 1080)):
@@ -56,14 +58,18 @@ class FakeKeyboard:
     def type_text(self, text):
         self.calls.append(("type_text", text))
 
+    # Key strings are parsed for real, so a fake run rejects what a real one would.
     def press(self, combo, repeat=1):
+        inputs.parse_combo(combo)
         self.calls.append(("press", combo, repeat))
 
     def hold(self, combo, duration):
+        inputs.parse_combo(combo)
         self.calls.append(("hold", combo, duration))
 
     @contextlib.contextmanager
     def modifiers_held(self, text):
+        inputs.parse_modifiers(text)
         self.calls.append(("modifiers_down", text))
         try:
             yield
