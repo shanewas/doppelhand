@@ -35,6 +35,30 @@ def coordinate(text: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError(f"expected X,Y but got {text!r}") from None
 
 
+class JsonParser(argparse.ArgumentParser):
+    """Reports usage errors the same way every other failure is reported, so a caller
+    parsing stdout never has to fall back to reading argparse's prose."""
+
+    def error(self, message: str):
+        print(json.dumps({"ok": False, "error": message,
+                          "usage": self.format_usage().strip()}))
+        raise SystemExit(2)
+
+
+def monitor_choice(text: str) -> int | str:
+    wanted = text.strip().lower()
+    if wanted in ("all", "primary"):
+        return wanted
+    try:
+        number = int(wanted)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a monitor number, 'primary' or 'all', got {text!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("monitors are numbered from 1")
+    return number
+
+
 def region(text: str) -> tuple[int, int, int, int]:
     try:
         left, top, width, height = (int(part.strip()) for part in text.split(","))
@@ -46,7 +70,7 @@ def region(text: str) -> tuple[int, int, int, int]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = JsonParser(
         prog="doppelhand",
         description="Read the Windows screen, drive the mouse and keyboard.",
     )
@@ -59,12 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
                          help="coordinate space of the arguments (default: view)")
         sub.add_argument("--max-edge", type=int, default=None,
                          help="long edge of the view space (default: the last shot's)")
+        sub.add_argument("--monitor", type=monitor_choice, default=None,
+                         help="which display: a number, 'primary' or 'all'")
         return sub
 
     shot = action("shot", "capture the screen to a PNG")
     shot.add_argument("out", nargs="?", default=None, help="where to write the PNG")
     shot.add_argument("--region", type=region, default=None,
                       help="capture X,Y,W,H instead of the whole display")
+    shot.add_argument("--no-cursor", dest="cursor", action="store_false",
+                      help="leave the mouse pointer out of the capture")
 
     action("screen", "report the coordinate space without capturing")
     action("cursor", "report where the pointer is")
@@ -109,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-steps", type=int, default=30, help="model turns before giving up")
     run.add_argument("--max-edge", type=int, default=DEFAULT_MAX_EDGE,
                      help="long edge of the screenshots sent to the model")
+    run.add_argument("--monitor", type=monitor_choice, default=None,
+                     help="which display: a number, 'primary' or 'all'")
     run.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
     run.add_argument("-q", "--quiet", action="store_true", help="only print the final answer")
 
@@ -130,14 +160,38 @@ def _executor(args) -> Executor:
     """
     from doppelhand import screen
 
-    display = screen.screen_size()
+    attached = screen.monitors()
+    noted_edge, noted_monitor = session.recall(session.layout_of(attached))
+    wanted = getattr(args, "monitor", None)
+    if wanted is None:
+        wanted = noted_monitor
+    monitor = _pick_monitor(attached, wanted)
+
     if getattr(args, "space", "view") == "display":
-        return Executor(max_edge=max(display))
-    return Executor(max_edge=args.max_edge or session.recall_max_edge(display))
+        max_edge = max(monitor.size)
+    else:
+        max_edge = args.max_edge or noted_edge or DEFAULT_MAX_EDGE
+    return Executor(max_edge=max_edge, monitor=monitor,
+                    cursor=getattr(args, "cursor", True))
+
+
+def _pick_monitor(attached: list, wanted):
+    from doppelhand import screen
+
+    if wanted in ("all", 0):
+        return screen.virtual_monitor()
+    if wanted in (None, "primary"):
+        return next((m for m in attached if m.primary), attached[0])
+    for monitor in attached:
+        if monitor.index == wanted:
+            return monitor
+    raise DoppelhandError(f"there is no monitor {wanted}; "
+                          f"attached: {[m.index for m in attached]}")
 
 
 def _space(executor: Executor, args) -> dict:
     return {
+        "monitor": executor.monitor.index,
         "view": list(executor.view_size),
         "display": list(executor.screen_size),
         "scale": round(executor.scale, 6),
@@ -152,9 +206,10 @@ def cmd_shot(args, executor: Executor) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if args.region:
-        image = fit(screen.grab(_crop_box(executor, args.region)), executor.max_edge)
+        image = fit(screen.grab(executor.crop_box(*args.region), executor.cursor),
+                    executor.max_edge)
     else:
-        image = fit(screen.grab(), executor.max_edge)
+        image = executor.capture()
     image.save(out)
 
     payload = {"path": str(out), **_space(executor, args)}
@@ -165,35 +220,31 @@ def cmd_shot(args, executor: Executor) -> dict:
         payload["note"] = "read this image, do not take click coordinates from it"
     else:
         # The PNG is already on disk, so a failure to note the space cannot make this
-        # a failed capture. It costs the caller a --max-edge flag on the next command.
-        payload["space_remembered"] = session.remember(executor.max_edge,
-                                                       executor.screen_size)
+        # a failed capture. It costs the caller a flag on the next command.
+        payload["space_remembered"] = session.remember(
+            executor.max_edge, executor.monitor.index,
+            session.layout_of(screen.monitors()))
     payload["image"] = list(image.size)
+    payload["cursor_drawn"] = executor.cursor
     return payload
 
 
-def _crop_box(executor: Executor, wanted: tuple[int, int, int, int]) -> tuple[int, ...]:
-    """Turn a region in the caller's space into a physical box, refusing one that misses
-    the screen rather than clamping it into a stripe of pixels from the wrong place."""
-    left, top, width, height = wanted
-    view_width, view_height = executor.view_size
-    if left >= view_width or top >= view_height or left + width <= 0 or top + height <= 0:
-        raise DoppelhandError(
-            f"region {list(wanted)} lies outside the {view_width}x{view_height} view")
-    x0, y0 = executor.to_physical(left, top)
-    x1, y1 = executor.to_physical(left + width, top + height)
-    return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
-
-
 def cmd_screen(args, executor: Executor) -> dict:
-    return _space(executor, args)
+    from doppelhand import screen
+
+    return {"monitors": [m.describe() for m in screen.monitors()],
+            **_space(executor, args)}
 
 
 def cmd_cursor(args, executor: Executor) -> dict:
-    from doppelhand import inputs
+    from doppelhand import inputs, screen
 
-    physical = inputs.cursor_position()
-    return {"view": list(executor.to_view(*physical)), "display": list(physical),
+    x, y = inputs.cursor_position()
+    on = next((m.index for m in screen.monitors()
+               if m.origin[0] <= x < m.origin[0] + m.size[0]
+               and m.origin[1] <= y < m.origin[1] + m.size[1]), None)
+    return {"view": list(executor.to_view(x, y)), "display": [x, y],
+            "monitor": executor.monitor.index, "pointer_on_monitor": on,
             "scale": round(executor.scale, 6)}
 
 
@@ -279,13 +330,10 @@ def cmd_install_skill(args) -> int:
 def cmd_run(args) -> int:
     import anthropic
 
+    from doppelhand import screen
     from doppelhand.agent import DEFAULT_MODEL, Agent
 
-    executor = Executor(max_edge=args.max_edge)
     model = args.model or DEFAULT_MODEL
-    if not args.yes and not _confirm(executor, model, args):
-        print("cancelled")
-        return 1
 
     def report(kind: str, detail: str) -> None:
         if args.quiet:
@@ -294,6 +342,13 @@ def cmd_run(args) -> int:
         print(f"{marks.get(kind, '  ')} {detail}", flush=True)
 
     try:
+        # Picking the display can fail on a bad --monitor, so it belongs with the rest
+        # of the run's error handling rather than above it.
+        executor = Executor(max_edge=args.max_edge,
+                            monitor=_pick_monitor(screen.monitors(), args.monitor))
+        if not args.yes and not _confirm(executor, model, args):
+            print("cancelled")
+            return 1
         agent = Agent(model=model, executor=executor, max_steps=args.max_steps,
                       on_event=report)
         answer = agent.run(args.task)
@@ -330,7 +385,8 @@ def _confirm(executor: Executor, model: str, args) -> bool:
     print(f"doppelhand {__version__}")
     print(f"  task    {args.task}")
     print(f"  model   {model}")
-    print(f"  screen  {executor.screen_size[0]}x{executor.screen_size[1]} "
+    print(f"  screen  monitor {executor.monitor.index}, "
+          f"{executor.screen_size[0]}x{executor.screen_size[1]} "
           f"-> {width}x{height} sent to the model")
     print(f"  budget  {args.max_steps} steps")
     print("This takes over the mouse and keyboard of this machine. "

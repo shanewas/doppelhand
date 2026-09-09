@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 — 2026-09-09
+
+Every display is reachable, the pointer is visible, and a coordinate that misses now says so.
+
+- A point outside the view is refused instead of being clamped to the nearest edge. Clamping meant a scale mistake clicked a screen corner and still reported success, which on Windows 11 is the show-desktop hotspot.
+- Usage errors print the same JSON shape as every other failure, so a caller parsing stdout never has to fall back to reading argparse's prose. They exit 2, while a refused action exits 1.
+- `screen` lists every display, numbered left to right. `--monitor N` picks one and `--monitor all` captures them as a single wide image. Each display has its own view space starting at 0,0, so coordinates stay positive whatever the desktop layout.
+- Screenshots include the mouse pointer, composited in after the capture because a GDI copy never contains it. `shot --no-cursor` leaves it out.
+- `cursor` reports which display the pointer is actually on, not just where it is in the current view.
+- The display of the last shot is remembered along with its size. Moving or unplugging a monitor discards the memory instead of misplacing a click.
+- Input refused by a background desktop is retried after attaching to the input desktop, sending only the events that did not get through.
+
 ## 1.1.0 — 2026-09-09
 
 Any AI harness can now use doppelhand as its hands, with no API key and no second model.

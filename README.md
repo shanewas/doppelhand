@@ -40,8 +40,8 @@ $ doppelhand click 640,360
 
 | Command | |
 |---|---|
-| `shot [PATH] [--region X,Y,W,H]` | capture, write a PNG, report the coordinate space |
-| `screen` | report the coordinate space without capturing |
+| `shot [PATH] [--region X,Y,W,H] [--monitor N]` | capture, write a PNG, report the coordinate space |
+| `screen` | list the displays and report the coordinate space |
 | `click X,Y [--button] [--count] [--modifiers]` | click, double click, right click |
 | `move X,Y` / `drag X1,Y1 X2,Y2` | move the pointer, or press and drag |
 | `scroll up\|down\|left\|right [N] [--at X,Y]` | scroll |
@@ -49,7 +49,11 @@ $ doppelhand click 640,360
 | `hold "shift" 2` / `wait 1.5` | hold a key, or pause |
 | `cursor` | where the pointer is, in both spaces |
 
-Coordinates are the pixels of the screenshot, not of the display; doppelhand scales them back up. Pass `--space display` if you already have real display pixels. The size a shot was taken at is remembered, so a later click lands in the same space without repeating `--max-edge`.
+Coordinates are the pixels of the screenshot, not of the display; doppelhand scales them back up. A point outside that view is refused rather than clamped, so a scale mistake fails loudly instead of clicking a corner. Pass `--space display` if you already have real display pixels.
+
+Every display is addressable. `screen` lists them numbered left to right, `--monitor N` picks one, and `--monitor all` captures the lot as a single wide image. Each display has its own view space starting at 0,0, so coordinates never go negative. The display and size of the last shot are remembered, so the next command lands in the same space without repeating flags; rearranging or unplugging a monitor discards that memory rather than misplacing a click.
+
+Screenshots include the mouse pointer, which a GDI capture leaves out by default. Turn it off with `shot --no-cursor`.
 
 ## Or let it drive itself
 
@@ -87,10 +91,10 @@ print(Agent(max_steps=10).run("close the notification in the corner"))
 
 In the built-in loop, costs are kept down two ways: one prompt-cache breakpoint moves along with the newest tool result, and screenshots older than the last ten are dropped from the history in batches.
 
-## Limits in 1.1.0
+## Limits in 1.2.0
 
-- Primary display only. A second monitor is not captured and cannot be clicked.
-- Actions are run against the display as a whole; there is no per-window targeting.
+- Actions are run against a display as a whole; there is no per-window targeting.
+- Displays are addressed one at a time. `--monitor all` captures them together but scales the result down too far to read.
 - The Escape stop applies to `run`, which checks it before each action. Single commands have already finished by the time you could press anything.
 - The built-in loop is covered by tests against a scripted client, not by a recorded live run.
 

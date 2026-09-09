@@ -8,20 +8,44 @@ from types import SimpleNamespace
 from PIL import Image
 
 from doppelhand import inputs
+from doppelhand.screen import Monitor
 
 
 class FakeScreen:
-    def __init__(self, size=(1920, 1080)):
+    def __init__(self, size=(1920, 1080), layout=None):
         self.size = size
+        self._monitors = layout or [Monitor(1, (0, 0), size, True)]
         self.grabs = []
+
+    def monitors(self):
+        return list(self._monitors)
+
+    def primary_monitor(self):
+        return next(m for m in self._monitors if m.primary)
+
+    def virtual_monitor(self):
+        boxes = [m.box for m in self._monitors]
+        left = min(b[0] for b in boxes)
+        top = min(b[1] for b in boxes)
+        right = max(b[0] + b[2] for b in boxes)
+        bottom = max(b[1] + b[3] for b in boxes)
+        return Monitor(0, (left, top), (right - left, bottom - top), False)
 
     def screen_size(self):
         return self.size
 
-    def grab(self, region=None):
-        self.grabs.append(region)
+    def grab(self, region=None, cursor=False):
+        self.grabs.append((region, cursor))
         width, height = self.size if region is None else (region[2], region[3])
         return Image.new("RGB", (width, height), "white")
+
+
+def three_monitors():
+    """The layout that caught the single-display assumption: primary in the middle,
+    one display to its left at a negative offset, one to its right."""
+    return [Monitor(1, (-1920, 0), (1920, 1080), False),
+            Monitor(2, (0, 0), (1920, 1080), True),
+            Monitor(3, (1920, 0), (1920, 1080), False)]
 
 
 class FakeKeyboard:

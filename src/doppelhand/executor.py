@@ -34,29 +34,62 @@ _CLICKS = {
 class Executor:
     """Maps toolset members onto real input, and screenshot pixels onto real pixels.
 
-    Claude answers in the pixel space of the screenshot it was sent, which is smaller
-    than the display, so every incoming coordinate is scaled back up before use.
+    The caller answers in the pixel space of the screenshot it was given, which is
+    smaller than the display and starts at that display's own corner. Every incoming
+    coordinate is checked against that space and then translated to a point on the
+    virtual desktop, which is where the input driver works.
     """
 
-    def __init__(self, max_edge: int = DEFAULT_MAX_EDGE, screen=_screen, keyboard=_inputs):
-        self.screen = screen
-        self.keyboard = keyboard
+    def __init__(self, max_edge: int = DEFAULT_MAX_EDGE, monitor=None,
+                 screen=None, keyboard=None, cursor: bool = True):
+        self.screen = screen or _screen
+        self.keyboard = keyboard or _inputs
         self.max_edge = max_edge
-        self.screen_size = screen.screen_size()
+        self.cursor = cursor
+        self.monitor = monitor if monitor is not None else self.screen.primary_monitor()
+        self.origin = self.monitor.origin
+        self.screen_size = self.monitor.size
         width, height = self.screen_size
         self.scale = min(1.0, max_edge / max(width, height))
         self.view_size = (round(width * self.scale), round(height * self.scale))
 
     def to_physical(self, x: float, y: float) -> tuple[int, int]:
+        """View pixel to a point on the virtual desktop, clamped to this display."""
         width, height = self.screen_size
-        return (min(width - 1, max(0, round(x / self.scale))),
-                min(height - 1, max(0, round(y / self.scale))))
+        return (self.origin[0] + min(width - 1, max(0, round(x / self.scale))),
+                self.origin[1] + min(height - 1, max(0, round(y / self.scale))))
 
     def to_view(self, x: float, y: float) -> tuple[int, int]:
-        return round(x * self.scale), round(y * self.scale)
+        return (round((x - self.origin[0]) * self.scale),
+                round((y - self.origin[1]) * self.scale))
+
+    def check_in_view(self, x: float, y: float) -> None:
+        """Refuse a point that is not on this display.
+
+        Clamping instead would put the pointer at the nearest edge and report success,
+        which turns a coordinate mistake into a click somewhere nobody asked for.
+        """
+        width, height = self.view_size
+        if not (0 <= x <= width and 0 <= y <= height):
+            raise ActionError(
+                f"({x}, {y}) is outside the {width}x{height} view of monitor "
+                f"{self.monitor.index}")
+
+    def crop_box(self, left: int, top: int, width: int, height: int) -> tuple[int, ...]:
+        """A region in view pixels to a capture box on the virtual desktop."""
+        view_width, view_height = self.view_size
+        if left >= view_width or top >= view_height or left + width <= 0 or top + height <= 0:
+            raise ActionError(f"region {[left, top, width, height]} lies outside the "
+                              f"{view_width}x{view_height} view")
+        x0, y0 = self.to_physical(left, top)
+        x1, y1 = self.to_physical(left + width, top + height)
+        return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
+
+    def capture(self):
+        return fit(self.screen.grab(self.monitor.box, self.cursor), self.max_edge)
 
     def screenshot(self) -> dict:
-        return _image_block(fit(self.screen.grab(), self.max_edge))
+        return _image_block(self.capture())
 
     def dispatch(self, name: str, params: dict | None = None) -> list[dict]:
         """Run one toolset member and return the blocks for its tool result."""
@@ -74,6 +107,7 @@ class Executor:
             return None
         if len(value) != 2:
             raise ActionError(f"{key} needs two numbers, got {value!r}")
+        self.check_in_view(value[0], value[1])
         return self.to_physical(value[0], value[1])
 
     def _do_screenshot(self, params: dict) -> list[dict]:
@@ -83,11 +117,10 @@ class Executor:
         region = params.get("region")
         if not region or len(region) != 4:
             raise ActionError("zoom needs a region of [x0, y0, x1, y1]")
-        left, top = self.to_physical(region[0], region[1])
-        right, bottom = self.to_physical(region[2], region[3])
-        left, right = sorted((left, right))
-        top, bottom = sorted((top, bottom))
-        crop = self.screen.grab((left, top, max(1, right - left), max(1, bottom - top)))
+        left, right = sorted((region[0], region[2]))
+        top, bottom = sorted((region[1], region[3]))
+        crop = self.screen.grab(self.crop_box(left, top, right - left, bottom - top),
+                                self.cursor)
         return [_image_block(fit(crop, self.max_edge))]
 
     def _do_left_click(self, params: dict) -> list[dict]:

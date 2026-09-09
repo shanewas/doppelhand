@@ -46,6 +46,38 @@ def test_astral_characters_become_surrogate_pairs():
     assert len(inputs._code_units("\U0001F600")) == 2
 
 
+class StubUser32:
+    """Refuses the first `blocked` events, the way a background desktop does."""
+
+    def __init__(self, blocked):
+        self.blocked = blocked
+        self.batches = []
+
+    def SendInput(self, count, array, size):
+        self.batches.append(count)
+        allowed = max(0, count - self.blocked)
+        self.blocked = max(0, self.blocked - count)
+        return allowed
+
+
+def test_refused_input_is_retried_without_repeating_what_got_through(monkeypatch):
+    stub = StubUser32(blocked=1)
+    monkeypatch.setattr(inputs, "_user32", stub)
+    monkeypatch.setattr("doppelhand.screen.attach_input_desktop", lambda: True)
+
+    inputs._send(inputs._key_event(0x41, up=False), inputs._key_event(0x41, up=True))
+
+    # Three of four events would mean one key press sent twice.
+    assert stub.batches == [2, 1]
+
+
+def test_input_that_stays_blocked_is_an_error(monkeypatch):
+    monkeypatch.setattr(inputs, "_user32", StubUser32(blocked=99))
+    monkeypatch.setattr("doppelhand.screen.attach_input_desktop", lambda: False)
+    with pytest.raises(ActionError):
+        inputs._send(inputs._key_event(0x41, up=False))
+
+
 def test_modifier_string_parses():
     assert inputs.parse_modifiers("ctrl+alt") == [VK_CONTROL, 0x12]
     assert inputs.parse_modifiers(None) == []

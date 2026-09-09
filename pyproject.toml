@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "doppelhand"
-version = "1.1.0"
+version = "1.2.0"
 description = "Windows agent that reads the screen and drives the mouse and keyboard like a person would"
 readme = "README.md"
 license = "MIT"

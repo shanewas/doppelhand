@@ -4,35 +4,31 @@ import re
 import pytest
 
 from doppelhand import cli, executor as executor_module, session, skills
-from doppelhand.executor import Executor
-from fakes import FakeKeyboard, FakeScreen
+from fakes import FakeKeyboard, FakeScreen, three_monitors
 
 
 @pytest.fixture(autouse=True)
 def hermetic(monkeypatch, tmp_path):
-    """No real screen, no real cursor, no writing into the user's app data."""
+    """No real screen, no real cursor, no writing into the user's app data.
+
+    The fake screen carries the three-monitor layout that exposed the single-display
+    assumption, so every CLI test runs against the harder arrangement.
+    """
     monkeypatch.setattr(executor_module, "SETTLE_SECONDS", 0)
     monkeypatch.setenv("DOPPELHAND_HOME", str(tmp_path))
-    screen, keyboard = FakeScreen(), FakeKeyboard()
+    screen, keyboard = FakeScreen(layout=three_monitors()), FakeKeyboard()
     monkeypatch.setattr("doppelhand.screen.grab", screen.grab)
     monkeypatch.setattr("doppelhand.screen.screen_size", screen.screen_size)
+    monkeypatch.setattr("doppelhand.screen.monitors", screen.monitors)
+    monkeypatch.setattr("doppelhand.screen.primary_monitor", screen.primary_monitor)
+    monkeypatch.setattr("doppelhand.screen.virtual_monitor", screen.virtual_monitor)
     monkeypatch.setattr("doppelhand.inputs.cursor_position", lambda: keyboard.cursor)
-
-    built = {}
-
-    def executor_for(args):
-        max_edge = (max(screen.size) if getattr(args, "space", "view") == "display"
-                    else args.max_edge or session.recall_max_edge(screen.size))
-        built["executor"] = Executor(max_edge=max_edge, screen=screen, keyboard=keyboard)
-        return built["executor"]
-
-    monkeypatch.setattr(cli, "_executor", executor_for)
+    # The executor resolves these when it is built, so the CLI's own construction path
+    # runs unchanged and still reaches the fakes.
+    monkeypatch.setattr(executor_module, "_screen", screen)
+    monkeypatch.setattr(executor_module, "_inputs", keyboard)
+    keyboard.screen = screen
     return keyboard
-
-
-def run(*argv) -> tuple[int, dict]:
-    code = cli.main(list(argv))
-    return code, code
 
 
 @pytest.fixture
@@ -75,10 +71,14 @@ def test_a_region_shot_says_not_to_click_from_it(invoke, tmp_path):
     assert "region" in payload
 
 
+LAYOUT = [[1, [-1920, 0], [1920, 1080]], [2, [0, 0], [1920, 1080]],
+          [3, [1920, 0], [1920, 1080]]]
+
+
 def test_the_view_size_of_the_last_shot_is_reused(invoke, tmp_path):
     _, payload = invoke("shot", str(tmp_path / "big.png"), "--max-edge", "1568")
     assert payload["space_remembered"] is True
-    assert session.recall_max_edge((1920, 1080)) == 1568
+    assert session.recall(LAYOUT) == (1568, 2)
     _, payload = invoke("screen")
     assert payload["view"] == [1568, 882]
 
@@ -86,19 +86,20 @@ def test_the_view_size_of_the_last_shot_is_reused(invoke, tmp_path):
 def test_a_region_shot_does_not_change_the_remembered_space(invoke, tmp_path):
     invoke("shot", str(tmp_path / "a.png"), "--max-edge", "1568")
     invoke("shot", str(tmp_path / "b.png"), "--region", "0,0,10,10", "--max-edge", "800")
-    assert session.recall_max_edge((1920, 1080)) == 1568
+    assert session.recall(LAYOUT) == (1568, 2)
 
 
-def test_a_resolution_change_throws_the_remembered_space_away(invoke, tmp_path):
+def test_moving_a_display_throws_the_remembered_space_away(invoke, tmp_path):
     invoke("shot", str(tmp_path / "before.png"), "--max-edge", "1568")
-    assert session.recall_max_edge((1280, 800)) == executor_module.DEFAULT_MAX_EDGE
+    rearranged = [[1, [0, 0], [1920, 1080]], [2, [1920, 0], [1920, 1080]]]
+    assert session.recall(rearranged) == (None, None)
 
 
 def test_a_corrupt_note_falls_back_instead_of_crashing(invoke, tmp_path):
-    (session.state_dir()).mkdir(parents=True, exist_ok=True)
-    for junk in ("null", "42", "[]", "not json at all"):
+    session.state_dir().mkdir(parents=True, exist_ok=True)
+    for junk in ("null", "42", "[]", '{"max_edge": null}', "not json at all"):
         (session.state_dir() / "session.json").write_text(junk, encoding="utf-8")
-        assert session.recall_max_edge((1920, 1080)) == executor_module.DEFAULT_MAX_EDGE
+        assert session.recall(LAYOUT) == (None, None)
         code, payload = invoke("screen")
         assert code == 0 and payload["view"] == [1280, 720]
 
@@ -137,6 +138,14 @@ def test_cursor_is_reported_in_both_spaces(invoke, hermetic):
     hermetic.cursor = (960, 540)
     _, payload = invoke("cursor")
     assert payload["view"] == [640, 360] and payload["display"] == [960, 540]
+    assert payload["pointer_on_monitor"] == 2
+
+
+def test_cursor_says_when_the_pointer_is_on_another_display(invoke, hermetic):
+    hermetic.cursor = (-900, 300)  # on the left-hand monitor
+    _, payload = invoke("cursor")
+    assert payload["monitor"] == 2 and payload["pointer_on_monitor"] == 1
+    assert payload["view"][0] < 0  # off the left edge of the view being worked in
 
 
 def test_drag_scroll_type_and_key_reach_the_driver(invoke, hermetic):
@@ -163,6 +172,68 @@ def test_an_unknown_key_comes_back_as_a_failure(invoke):
 def test_only_the_left_button_double_clicks(invoke):
     code, payload = invoke("click", "1,1", "--button", "right", "--count", "2")
     assert code == 1 and payload["ok"] is False
+
+
+def test_a_click_off_the_screen_is_refused_instead_of_landing_in_a_corner(invoke,
+                                                                          hermetic):
+    code, payload = invoke("click", "99999,99999")
+    assert code == 1 and payload["ok"] is False
+    assert "outside" in payload["error"]
+    assert hermetic.calls == []
+
+
+def test_a_usage_error_is_still_json(capsys):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["click", "notacoord"])
+    assert caught.value.code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False and "usage" in payload
+
+
+def test_an_unknown_monitor_is_refused(invoke):
+    code, payload = invoke("shot", "--monitor", "9")
+    assert code == 1 and "no monitor 9" in payload["error"]
+
+
+def test_a_bad_monitor_on_a_run_is_reported_not_raised(capsys):
+    assert cli.main(["run", "do something", "--monitor", "9", "-y"]) == 1
+    assert "no monitor 9" in capsys.readouterr().err
+
+
+def test_screen_lists_every_display(invoke):
+    _, payload = invoke("screen")
+    assert [m["monitor"] for m in payload["monitors"]] == [1, 2, 3]
+    assert payload["monitor"] == 2  # the primary one, in the middle
+    assert [m["origin"] for m in payload["monitors"]][0] == [-1920, 0]
+
+
+def test_a_click_on_another_display_uses_that_display_origin(invoke, hermetic):
+    invoke("click", "640,360", "--monitor", "3")
+    assert ("move", 2880, 540) in hermetic.calls
+
+
+def test_the_display_of_the_last_shot_is_reused(invoke, tmp_path, hermetic):
+    invoke("shot", str(tmp_path / "left.png"), "--monitor", "1")
+    _, payload = invoke("screen")
+    assert payload["monitor"] == 1
+    invoke("click", "0,0")
+    assert ("move", -1920, 0) in hermetic.calls
+
+
+def test_every_display_at_once_is_one_wide_view(invoke, tmp_path):
+    _, payload = invoke("shot", str(tmp_path / "all.png"), "--monitor", "all")
+    assert payload["display"] == [5760, 1080]
+    assert payload["monitor"] == 0
+
+
+def test_the_pointer_is_drawn_unless_it_is_turned_off(invoke, tmp_path, hermetic):
+    _, payload = invoke("shot", str(tmp_path / "with.png"))
+    assert payload["cursor_drawn"] is True
+    assert hermetic.screen.grabs[-1][1] is True
+
+    _, payload = invoke("shot", str(tmp_path / "without.png"), "--no-cursor")
+    assert payload["cursor_drawn"] is False
+    assert hermetic.screen.grabs[-1][1] is False
 
 
 def test_the_skill_can_be_printed(capsys):

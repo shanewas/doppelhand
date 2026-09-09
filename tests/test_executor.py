@@ -34,10 +34,32 @@ def test_a_click_lands_on_the_matching_physical_pixel(parts):
     assert ("click", "left", 1) in keyboard.calls
 
 
-def test_coordinates_never_leave_the_screen(parts):
+def test_a_point_off_the_view_is_refused_rather_than_clamped(parts):
+    ex, _, keyboard = parts
+    with pytest.raises(ActionError) as caught:
+        ex.dispatch("left_click", {"coordinate": [99999, 99999]})
+    assert "outside" in str(caught.value)
+    assert keyboard.calls == []
+
+
+def test_the_far_edge_of_the_view_still_counts_as_on_screen(parts):
+    ex, _, keyboard = parts
+    ex.dispatch("left_click", {"coordinate": [1280, 720]})
+    assert ("move", 1919, 1079) in keyboard.calls
+
+
+def test_a_drag_that_leaves_the_view_is_refused(parts):
+    ex, _, keyboard = parts
+    with pytest.raises(ActionError):
+        ex.dispatch("left_click_drag", {"start_coordinate": [10, 10],
+                                        "coordinate": [4000, 10]})
+    assert keyboard.calls == []
+
+
+def test_zoom_outside_the_view_is_refused(parts):
     ex, _, _ = parts
-    assert ex.to_physical(5000, 5000) == (1919, 1079)
-    assert ex.to_physical(-40, -40) == (0, 0)
+    with pytest.raises(ActionError):
+        ex.dispatch("zoom", {"region": [5000, 5000, 5100, 5100]})
 
 
 def test_screenshot_is_a_png_of_the_view_size(parts):
@@ -51,7 +73,7 @@ def test_screenshot_is_a_png_of_the_view_size(parts):
 def test_zoom_grabs_the_region_in_physical_pixels(parts):
     ex, screen, _ = parts
     ex.dispatch("zoom", {"region": [0, 0, 640, 360]})
-    assert screen.grabs[-1] == (0, 0, 960, 540)
+    assert screen.grabs[-1] == ((0, 0, 960, 540), True)
 
 
 def test_modifiers_wrap_the_click(parts):
@@ -132,3 +154,39 @@ def test_escape_held_down_stops_everything(parts):
 def test_fit_never_enlarges():
     small = Image.new("RGB", (400, 300))
     assert executor_module.fit(small, 1280) is small
+
+
+def test_a_second_monitor_gets_its_own_view_and_its_own_offset():
+    from fakes import three_monitors
+
+    screen, keyboard = FakeScreen(layout=three_monitors()), FakeKeyboard()
+    left = Executor(max_edge=1280, monitor=three_monitors()[0], screen=screen,
+                    keyboard=keyboard)
+    assert left.view_size == (1280, 720)
+    # The top left of the left-hand display sits at a negative virtual coordinate.
+    assert left.to_physical(0, 0) == (-1920, 0)
+    assert left.to_view(-1920, 0) == (0, 0)
+
+    left.dispatch("left_click", {"coordinate": [640, 360]})
+    assert ("move", -960, 540) in keyboard.calls
+
+
+def test_displays_are_numbered_by_horizontal_position():
+    """Monitors at different heights are common, and the number an agent is told has to
+    match what someone at the desk would count from the left."""
+    from doppelhand.screen import number_left_to_right
+
+    found = [((3840, -200), (1920, 1080), False),   # right, mounted high
+             ((0, 0), (1920, 1080), True),          # middle, the primary
+             ((1920, 500), (1920, 1080), False)]    # between them, sitting low
+    assert [m.origin[0] for m in number_left_to_right(found)] == [0, 1920, 3840]
+    assert [m.index for m in number_left_to_right(found)] == [1, 2, 3]
+
+
+def test_the_pointer_is_drawn_into_captures_by_default():
+    screen, keyboard = FakeScreen(), FakeKeyboard()
+    Executor(screen=screen, keyboard=keyboard).screenshot()
+    assert screen.grabs[-1] == ((0, 0, 1920, 1080), True)
+
+    Executor(screen=screen, keyboard=keyboard, cursor=False).screenshot()
+    assert screen.grabs[-1] == ((0, 0, 1920, 1080), False)

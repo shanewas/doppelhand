@@ -122,6 +122,18 @@ _SHIFT_STATE = {1: 0x10, 2: 0x11, 4: 0x12}
 def _send(*events: INPUT) -> None:
     array = (INPUT * len(events))(*events)
     sent = _user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
+    if sent == len(events):
+        return
+
+    # A thread on a background desktop has its synthetic input refused. Attaching to the
+    # input desktop and re-sending only the events that did not go through avoids
+    # repeating the ones that did, which would double a keystroke or a button press.
+    from doppelhand.screen import attach_input_desktop
+
+    if attach_input_desktop():
+        remaining = len(events) - sent
+        tail = (INPUT * remaining)(*events[sent:])
+        sent += _user32.SendInput(remaining, tail, ctypes.sizeof(INPUT))
     if sent != len(events):
         raise ActionError(f"input was blocked after {sent} of {len(events)} events "
                           f"(error {ctypes.get_last_error()})")
@@ -226,7 +238,10 @@ def abort_requested() -> bool:
 def cursor_position() -> tuple[int, int]:
     point = wintypes.POINT()
     if not _user32.GetCursorPos(ctypes.byref(point)):
-        raise ActionError("could not read the cursor position")
+        from doppelhand.screen import attach_input_desktop
+        attach_input_desktop()
+        if not _user32.GetCursorPos(ctypes.byref(point)):
+            raise ActionError("could not read the cursor position")
     return point.x, point.y
 
 
@@ -234,7 +249,10 @@ def move(x: int, y: int) -> None:
     # ponytail: SetCursorPos lands on the exact pixel; switch to absolute SendInput
     # moves if a target application ignores it (some full-screen games do).
     if not _user32.SetCursorPos(int(x), int(y)):
-        raise ActionError(f"could not move the cursor to ({x}, {y})")
+        from doppelhand.screen import attach_input_desktop
+        attach_input_desktop()
+        if not _user32.SetCursorPos(int(x), int(y)):
+            raise ActionError(f"could not move the cursor to ({x}, {y})")
 
 
 _BUTTONS = {
