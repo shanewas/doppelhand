@@ -112,10 +112,9 @@ def test_a_screenshot_that_landed_is_reported_even_if_the_note_fails(invoke, tmp
     assert (tmp_path / "shot.png").exists()
 
 
-def test_a_region_with_no_area_is_rejected():
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["shot", "--region", "500,500,-100,-50"])
-    assert caught.value.code == 2
+def test_a_region_with_no_area_is_rejected(invoke):
+    code, payload = invoke("shot", "--region", "500,500,-100,-50")
+    assert code == 2 and "no area" in payload["error"]
 
 
 def test_a_region_off_the_screen_is_refused(invoke, tmp_path):
@@ -157,10 +156,9 @@ def test_drag_scroll_type_and_key_reach_the_driver(invoke, hermetic):
     assert {"drag", "scroll", "type_text", "press"} <= set(kinds)
 
 
-def test_a_bad_coordinate_is_rejected_by_the_parser():
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["click", "middle-of-the-screen"])
-    assert caught.value.code == 2
+def test_a_bad_coordinate_is_rejected_by_the_parser(invoke):
+    code, payload = invoke("click", "middle-of-the-screen")
+    assert code == 2 and payload["ok"] is False
 
 
 def test_an_unknown_key_comes_back_as_a_failure(invoke):
@@ -182,12 +180,10 @@ def test_a_click_off_the_screen_is_refused_instead_of_landing_in_a_corner(invoke
     assert hermetic.calls == []
 
 
-def test_a_usage_error_is_still_json(capsys):
-    with pytest.raises(SystemExit) as caught:
-        cli.main(["click", "notacoord"])
-    assert caught.value.code == 2
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is False and "usage" in payload
+def test_a_usage_error_is_still_json(invoke):
+    code, payload = invoke("click", "notacoord")
+    assert code == 2 and payload["ok"] is False
+    assert "usage" in payload
 
 
 def test_an_unknown_monitor_is_refused(invoke):

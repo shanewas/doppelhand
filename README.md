@@ -55,6 +55,44 @@ Every display is addressable. `screen` lists them numbered left to right, `--mon
 
 Screenshots include the mouse pointer, which a GDI capture leaves out by default. Turn it off with `shot --no-cursor`.
 
+## Real time
+
+A fresh process costs about 300ms before it does anything, which dominates a session of
+many small actions. Run a server once and talk to it over loopback instead:
+
+```
+doppelhand serve
+```
+
+It prints a port and a secret, and writes both to `%LOCALAPPDATA%\doppelhand\serve.json`.
+Reads are GET, anything that moves the pointer or types is POST, and arguments keep the
+names the command line uses:
+
+```
+curl -sH "X-Doppelhand-Token: $TOKEN" "http://127.0.0.1:$PORT/shot?fast=1"
+curl -sXPOST -H "X-Doppelhand-Token: $TOKEN" "http://127.0.0.1:$PORT/click?at=640,360"
+```
+
+One run of `python bench/benchmark.py` on a three-monitor desktop. The spawned column
+moves a lot with what the machine is doing, so re-measure rather than trusting these:
+
+| action | spawned | served | |
+|---|---|---|---|
+| `cursor` | 309 ms | 5.6 ms | 55× |
+| `screen` | 262 ms | 5.3 ms | 49× |
+| `move` | 262 ms | 5.9 ms | 44× |
+| `shot` | 430 ms | 77 ms | 5.5× |
+| `shot --fast` | 378 ms | 30 ms | 12× |
+
+Most of the screenshot gain comes from capturing through DXGI Desktop Duplication, which
+hands over the frame the compositor already holds. Opening one costs more than a whole
+GDI capture, so it only pays inside the server; one-shot commands keep the GDI path, and
+so does any display that refuses to be duplicated. Every shot reports which it used in
+`source`.
+
+The server binds to loopback only, needs the secret from that file, and turns away any
+request that carries browser headers or names a host other than loopback.
+
 ## Or let it drive itself
 
 This is the only path that calls the Anthropic API, and the only one that needs a key.

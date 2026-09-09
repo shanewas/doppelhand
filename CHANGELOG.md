@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0 — 2026-09-09
+
+Built for driving a desktop in real time. An action costs about 6ms instead of 300, and a screenshot about 30ms instead of 400.
+
+Measured first: a command that did no work at all cost ~400ms, of which ~300ms was Python starting and importing, while capturing the screen through GDI cost 150-775ms and varied wildly from call to call. Resizing and encoding, the parts that looked expensive, were never more than 50ms together.
+
+- `doppelhand serve` holds one warm process open and answers the same actions over loopback HTTP. Reads are GET, anything that moves the pointer or types is POST, and the arguments keep the names the command line uses. The query string is turned back into a command line and handed to the same parser and the same functions, so the two surfaces cannot drift apart.
+- Screens are captured through DXGI Desktop Duplication, which hands over the frame the compositor already holds instead of asking the system to read the screen back. Held open by the server, a capture costs microseconds rather than hundreds of milliseconds, and an unchanged screen costs nothing at all. Opening a duplication is expensive, so one-shot commands keep using GDI, and any display that refuses duplication falls back to it too.
+- The pointer is composited onto duplicated frames, which arrive without one.
+- `shot --fast` writes JPEG and resizes by box filter, roughly a third of the time for slightly softer text.
+- A shot reports which path produced it in `source`.
+- The argument parser is built once in a long-lived process, which was costing 13ms of every request.
+- Usage errors return an exit code instead of raising, so a bad argument reads the same as any other failure.
+
+The server binds to loopback only, requires a secret it writes to a file in the user's own profile, refuses any request carrying browser headers, and refuses any request whose Host is not loopback, which is what stops a web page reaching it by name.
+
 ## 1.2.0 — 2026-09-09
 
 Every display is reachable, the pointer is visible, and a coordinate that misses now says so.

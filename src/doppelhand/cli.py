@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from doppelhand import __version__, session, skills
-from doppelhand.errors import Aborted, DoppelhandError, Refused, StepLimit
+from doppelhand.errors import Aborted, DoppelhandError, Refused, StepLimit, UsageError
 from doppelhand.executor import DEFAULT_MAX_EDGE, Executor, fit
 
 SPACES = ("view", "display")
@@ -36,13 +36,11 @@ def coordinate(text: str) -> tuple[int, int]:
 
 
 class JsonParser(argparse.ArgumentParser):
-    """Reports usage errors the same way every other failure is reported, so a caller
-    parsing stdout never has to fall back to reading argparse's prose."""
+    """Raises usage problems instead of printing them, so the same parser can answer a
+    command line and an HTTP request without either one inheriting the other's output."""
 
     def error(self, message: str):
-        print(json.dumps({"ok": False, "error": message,
-                          "usage": self.format_usage().strip()}))
-        raise SystemExit(2)
+        raise UsageError(message, self.format_usage().strip())
 
 
 def monitor_choice(text: str) -> int | str:
@@ -93,6 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="capture X,Y,W,H instead of the whole display")
     shot.add_argument("--no-cursor", dest="cursor", action="store_false",
                       help="leave the mouse pointer out of the capture")
+    shot.add_argument("--fast", action="store_true",
+                      help="JPEG and a cheaper resize: about a third of the time, "
+                           "slightly softer text")
 
     action("screen", "report the coordinate space without capturing")
     action("cursor", "report where the pointer is")
@@ -142,6 +143,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
     run.add_argument("-q", "--quiet", action="store_true", help="only print the final answer")
 
+    serve_cmd = commands.add_parser(
+        "serve", help="hold a warm process open and answer commands over HTTP")
+    serve_cmd.add_argument("--port", type=int, default=0,
+                           help="port on 127.0.0.1, or 0 to be given a free one")
+    serve_cmd.add_argument("--token", default=None,
+                           help="shared secret callers must send, generated if omitted")
+    serve_cmd.add_argument("-q", "--quiet", action="store_true")
+
     install = commands.add_parser("install-skill",
                                   help="install the agent skill into a harness")
     install.add_argument("target", nargs="?", choices=sorted(skills.TARGETS), default=None)
@@ -150,6 +159,18 @@ def build_parser() -> argparse.ArgumentParser:
                          help="write the skill to stdout instead of installing it")
     install.add_argument("--force", action="store_true", help="replace an existing skill")
     return parser
+
+
+_cached_parser: argparse.ArgumentParser | None = None
+
+
+def cached_parser() -> argparse.ArgumentParser:
+    """Building the parser costs more than most actions do, and parsing does not change
+    it, so a long-lived process builds it once."""
+    global _cached_parser
+    if _cached_parser is None:
+        _cached_parser = build_parser()
+    return _cached_parser
 
 
 def _executor(args) -> Executor:
@@ -202,15 +223,20 @@ def _space(executor: Executor, args) -> dict:
 def cmd_shot(args, executor: Executor) -> dict:
     from doppelhand import screen
 
-    out = Path(args.out or (session.state_dir() / "shot.png"))
+    fast = getattr(args, "fast", False)
+    default_name = "shot.jpg" if fast else "shot.png"
+    out = Path(args.out or (session.state_dir() / default_name))
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if args.region:
-        image = fit(screen.grab(executor.crop_box(*args.region), executor.cursor),
-                    executor.max_edge)
+        image = fit(executor.frame(executor.crop_box(*args.region)),
+                    executor.max_edge, fast=fast)
     else:
-        image = executor.capture()
-    image.save(out)
+        image = executor.capture(fast=fast)
+    if fast:
+        image.save(out, format="JPEG", quality=85)
+    else:
+        image.save(out)
 
     payload = {"path": str(out), **_space(executor, args)}
     if args.region:
@@ -226,6 +252,7 @@ def cmd_shot(args, executor: Executor) -> dict:
             session.layout_of(screen.monitors()))
     payload["image"] = list(image.size)
     payload["cursor_drawn"] = executor.cursor
+    payload["source"] = executor.last_source
     return payload
 
 
@@ -399,10 +426,18 @@ def _confirm(executor: Executor, model: str, args) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     _use_utf8()
-    args = build_parser().parse_args(argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except UsageError as exc:
+        print(json.dumps({"ok": False, "error": str(exc), "usage": exc.usage}))
+        return 2
 
     if args.command == "run":
         return cmd_run(args)
+    if args.command == "serve":
+        from doppelhand.serve import serve
+
+        return serve(port=args.port, token=args.token, quiet=args.quiet)
     try:
         if args.command == "install-skill":
             return cmd_install_skill(args)

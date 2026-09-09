@@ -41,11 +41,13 @@ class Executor:
     """
 
     def __init__(self, max_edge: int = DEFAULT_MAX_EDGE, monitor=None,
-                 screen=None, keyboard=None, cursor: bool = True):
+                 screen=None, keyboard=None, cursor: bool = True, frames=None):
         self.screen = screen or _screen
         self.keyboard = keyboard or _inputs
+        self.frames = frames
         self.max_edge = max_edge
         self.cursor = cursor
+        self.last_source = None
         self.monitor = monitor if monitor is not None else self.screen.primary_monitor()
         self.origin = self.monitor.origin
         self.screen_size = self.monitor.size
@@ -85,8 +87,39 @@ class Executor:
         x1, y1 = self.to_physical(left + width, top + height)
         return x0, y0, max(1, x1 - x0), max(1, y1 - y0)
 
-    def capture(self):
-        return fit(self.screen.grab(self.monitor.box, self.cursor), self.max_edge)
+    def capture(self, fast: bool = False):
+        return fit(self.frame(), self.max_edge, fast=fast)
+
+    def frame(self, box=None):
+        """The pixels of this display, or a box within it, at full resolution.
+
+        A held duplication answers in microseconds where GDI takes hundreds of
+        milliseconds, but it hands over a frame with no pointer drawn on it, so the
+        pointer is pasted on afterwards.
+        """
+        whole = self.frames.frame(self.monitor) if self.frames else None
+        if whole is None:
+            self.last_source = "gdi"
+            return self.screen.grab(box or self.monitor.box, self.cursor)
+        self.last_source = "duplication"
+        if self.cursor:
+            whole = self._with_pointer(whole)
+        if box is None:
+            return whole
+        left, top, width, height = box
+        origin_x, origin_y = self.monitor.origin
+        return whole.crop((left - origin_x, top - origin_y,
+                           left - origin_x + width, top - origin_y + height))
+
+    def _with_pointer(self, frame):
+        overlay = self.screen.cursor_overlay()
+        if overlay is None:
+            return frame
+        pointer, (x, y) = overlay
+        placed = frame.copy()
+        placed.paste(pointer, (x - self.monitor.origin[0], y - self.monitor.origin[1]),
+                     pointer)
+        return placed
 
     def screenshot(self) -> dict:
         return _image_block(self.capture())
@@ -119,8 +152,7 @@ class Executor:
             raise ActionError("zoom needs a region of [x0, y0, x1, y1]")
         left, right = sorted((region[0], region[2]))
         top, bottom = sorted((region[1], region[3]))
-        crop = self.screen.grab(self.crop_box(left, top, right - left, bottom - top),
-                                self.cursor)
+        crop = self.frame(self.crop_box(left, top, right - left, bottom - top))
         return [_image_block(fit(crop, self.max_edge))]
 
     def _do_left_click(self, params: dict) -> list[dict]:
@@ -244,12 +276,14 @@ def _duration(params: dict) -> float:
     return seconds
 
 
-def fit(image: Image.Image, max_edge: int) -> Image.Image:
+def fit(image: Image.Image, max_edge: int, fast: bool = False) -> Image.Image:
+    """Shrink to fit `max_edge`. BOX averages whole pixels and costs about half what
+    LANCZOS does, at the price of slightly softer text."""
     scale = min(1.0, max_edge / max(image.size))
     if scale == 1.0:
         return image
     return image.resize((round(image.width * scale), round(image.height * scale)),
-                        Image.LANCZOS)
+                        Image.BOX if fast else Image.LANCZOS)
 
 
 def _image_block(image: Image.Image) -> dict:

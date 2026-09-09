@@ -88,6 +88,36 @@ Ask before you start acting unless the user has already told you to go ahead. Sa
 
 The user can hold Escape to stop a `doppelhand run` at any time. Individual commands are single actions, so they finish immediately.
 
+## When you need speed
+
+Each `doppelhand` command starts a fresh Python process, which costs about 300ms before
+any work happens. For a handful of actions that is fine. For a long session, or anything
+where you are watching the screen change, run a server once and talk to it over loopback
+instead: an action drops to about 6ms and a screenshot to about 30ms.
+
+```
+$ doppelhand serve
+doppelhand 1.3.0 listening on http://127.0.0.1:52413
+token written to C:\Users\you\AppData\Local\doppelhand\serve.json
+```
+
+Read the port and token out of that file, then use the same actions as URL paths. Reads
+are GET, anything that moves the pointer or types is POST, and the arguments are the
+same names the command line uses:
+
+```
+curl -sH "X-Doppelhand-Token: $TOKEN" "http://127.0.0.1:$PORT/shot?fast=1"
+curl -sXPOST -H "X-Doppelhand-Token: $TOKEN" "http://127.0.0.1:$PORT/click?at=640,360"
+curl -sXPOST -H "X-Doppelhand-Token: $TOKEN" "http://127.0.0.1:$PORT/type?text=hello"
+```
+
+`fast=1` on a shot writes JPEG and uses a cheaper resize, which is about three times
+quicker and slightly softer on small text. Drop it when you need to read fine print.
+
+The server holds the display capture open, which is where most of the speed comes from,
+so leave it running for the whole session and stop it with
+`curl -sXPOST -H "X-Doppelhand-Token: $TOKEN" http://127.0.0.1:$PORT/stop` when done.
+
 ## Installing
 
 `pip install git+https://github.com/shanewas/doppelhand`, then `doppelhand screen` to check it works. Windows only.

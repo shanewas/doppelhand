@@ -10,6 +10,14 @@ class Aborted(DoppelhandError):
     """The operator asked for the run to stop."""
 
 
+class UsageError(DoppelhandError):
+    """The command line itself was wrong, before any action was attempted."""
+
+    def __init__(self, message: str, usage: str = ""):
+        self.usage = usage
+        super().__init__(message)
+
+
 class StepLimit(DoppelhandError):
     """The run used its whole step budget without finishing."""
 

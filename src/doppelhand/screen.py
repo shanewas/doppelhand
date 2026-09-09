@@ -8,6 +8,7 @@ the left of primary.
 from __future__ import annotations
 
 import ctypes
+import threading
 from ctypes import wintypes
 from dataclasses import dataclass
 
@@ -103,9 +104,17 @@ _gdi32.GetDIBits.argtypes = [
     wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
     ctypes.c_void_p, ctypes.POINTER(BITMAPINFO), wintypes.UINT,
 ]
+_gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+_gdi32.CreateDIBSection.argtypes = [
+    wintypes.HDC, ctypes.POINTER(BITMAPINFO), wintypes.UINT,
+    ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD,
+]
 
 _dpi_ready = False
 _input_desktop = None
+_attached = threading.local()
+#: Two threads opening the desktop at once would leak whichever handle lost the race.
+_desktop_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -130,24 +139,30 @@ def attach_input_desktop() -> bool:
     """Attach the calling thread to the active input desktop.
 
     Under a service or any non-interactive shell, threads start on a background desktop
-    where BitBlt, GetCursorPos and SendInput all fail with ERROR_ACCESS_DENIED. The
-    desktop handle has to outlive the call, because the thread keeps using it, so it is
-    opened once and held for the life of the process.
+    where BitBlt, GetCursorPos, SendInput and Desktop Duplication all fail with
+    ERROR_ACCESS_DENIED.
+
+    The desktop handle is opened once and held for the life of the process, because the
+    threads using it keep needing it. The attachment itself is per thread, though, so
+    every thread has to make the call: a server that answers requests on worker threads
+    would otherwise leave all of them on the wrong desktop.
     """
     global _input_desktop
-    if _input_desktop is not None:
+    if getattr(_attached, "done", False):
         return True
     try:
-        handle = _user32.OpenInputDesktop(0, False, DESKTOP_RIGHTS)
-        if not handle:
-            return False
-        if not _user32.SetThreadDesktop(handle):
+        with _desktop_lock:
+            if _input_desktop is None:
+                handle = _user32.OpenInputDesktop(0, False, DESKTOP_RIGHTS)
+                if not handle:
+                    return False
+                _input_desktop = handle
+        if not _user32.SetThreadDesktop(_input_desktop):
             # SetThreadDesktop refuses a thread that already owns windows or hooks.
-            _user32.CloseDesktop(handle)
             return False
     except (AttributeError, OSError):
         return False
-    _input_desktop = handle
+    _attached.done = True
     return True
 
 
@@ -277,6 +292,64 @@ def grab(region: tuple[int, int, int, int] | None = None,
         if mem_dc:
             _gdi32.DeleteDC(mem_dc)
         _user32.ReleaseDC(None, screen_dc)
+
+
+def cursor_overlay() -> tuple[Image.Image, tuple[int, int]] | None:
+    """The pointer as a standalone image, plus where its top left corner belongs on the
+    virtual desktop. Used by capture paths that hand over a frame with no pointer in it.
+
+    Returns None when the pointer is hidden or cannot be drawn, which is not worth
+    failing a screenshot over.
+    """
+    info = CURSORINFO()
+    info.cbSize = ctypes.sizeof(CURSORINFO)
+    if not _user32.GetCursorInfo(ctypes.byref(info)):
+        return None
+    if not (info.flags & CURSOR_SHOWING) or not info.hCursor:
+        return None
+
+    icon = ICONINFO()
+    if not _user32.GetIconInfo(info.hCursor, ctypes.byref(icon)):
+        return None
+    for handle in (icon.hbmMask, icon.hbmColor):
+        if handle:
+            _gdi32.DeleteObject(handle)
+
+    size = 64
+    header = BITMAPINFO()
+    header.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+    header.bmiHeader.biWidth = size
+    header.bmiHeader.biHeight = -size
+    header.bmiHeader.biPlanes = 1
+    header.bmiHeader.biBitCount = 32
+    header.bmiHeader.biCompression = BI_RGB
+
+    screen_dc = _user32.GetDC(None)
+    mem_dc = _gdi32.CreateCompatibleDC(screen_dc)
+    bits = ctypes.c_void_p()
+    bitmap = _gdi32.CreateDIBSection(mem_dc, ctypes.byref(header), DIB_RGB_COLORS,
+                                     ctypes.byref(bits), None, 0)
+    try:
+        if not bitmap or not bits:
+            return None
+        previous = _gdi32.SelectObject(mem_dc, bitmap)
+        drawn = _user32.DrawIconEx(mem_dc, 0, 0, info.hCursor, 0, 0, 0, None, DI_NORMAL)
+        _gdi32.SelectObject(mem_dc, previous)
+        if not drawn:
+            return None
+        raw = ctypes.string_at(bits, size * size * 4)
+    finally:
+        if bitmap:
+            _gdi32.DeleteObject(bitmap)
+        _gdi32.DeleteDC(mem_dc)
+        _user32.ReleaseDC(None, screen_dc)
+
+    overlay = Image.frombuffer("RGBA", (size, size), raw, "raw", "BGRA", 0, 1).copy()
+    if not overlay.getbbox() or overlay.getchannel("A").getbbox() is None:
+        # A monochrome cursor leaves the alpha channel empty; drawing it would paint a
+        # black square over the screen, so it is skipped rather than guessed at.
+        return None
+    return overlay, (info.ptScreenPos.x - icon.xHotspot, info.ptScreenPos.y - icon.yHotspot)
 
 
 def _draw_cursor(target_dc, left: int, top: int) -> None:
