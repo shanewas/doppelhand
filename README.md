@@ -7,9 +7,11 @@ It is the local half of Claude's computer-use toolset: the model decides, doppel
 ## Install
 
 ```
-pip install doppelhand
+pip install git+https://github.com/shanewas/doppelhand
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+Not on PyPI yet.
 
 Windows only, Python 3.10 or newer. The only dependencies are the Anthropic SDK and Pillow; screen capture and input go straight through the Win32 API.
 
