@@ -1,11 +1,19 @@
 # Changelog
 
+## 1.4.0 — 2026-09-26
+
+- `run --dry-run` resolves the display and prints the run plan as JSON without touching the SDK, the network, or the pointer. Harnesses and CI can validate the whole invocation path short of spending a model turn.
+- The benchmark's five cases are locked by tests: a case dropped from `CASES`, or a spawned side measuring a different action than the served side, fails the suite.
+
 ## 1.3.2 — 2026-09-26
 
-Hygiene release. No new actions, no behavior change.
+Hygiene release. No new actions.
 
 - The version now lives in one place: `doppelhand.__version__`. `pyproject.toml` reads it dynamically, so the installed metadata, `--version`, and the serve banner cannot drift apart again.
 - The skill doc's serve example no longer prints a hardcoded version.
+- The test suite now runs against the checkout. It used to import whatever doppelhand was pip-installed, so it could pass on stale code.
+- The server no longer dumps a traceback when a client RSTs an idle keep-alive connection; the request already answered.
+- `serve()` itself is now covered: token-file write/removal, banner, and capture shutdown.
 - New release checklist: `docs/RELEASE.md`.
 
 ## 1.3.1 — 2026-09-09
