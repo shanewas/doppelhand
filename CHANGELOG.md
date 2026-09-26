@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.2 — 2026-09-26
+
+Hygiene release. No new actions, no behavior change.
+
+- The version now lives in one place: `doppelhand.__version__`. `pyproject.toml` reads it dynamically, so the installed metadata, `--version`, and the serve banner cannot drift apart again.
+- The skill doc's serve example no longer prints a hardcoded version.
+- New release checklist: `docs/RELEASE.md`.
+
 ## 1.3.1 — 2026-09-09
 
 First release on PyPI: `pip install doppelhand`.

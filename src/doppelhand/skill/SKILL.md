@@ -97,7 +97,7 @@ instead: an action drops to about 6ms and a screenshot to about 30ms.
 
 ```
 $ doppelhand serve
-doppelhand 1.3.0 listening on http://127.0.0.1:52413
+doppelhand <version> listening on http://127.0.0.1:52413
 token written to C:\Users\you\AppData\Local\doppelhand\serve.json
 ```
 
