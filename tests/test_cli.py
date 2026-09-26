@@ -1,5 +1,6 @@
 import json
 import re
+import sys
 
 import pytest
 
@@ -194,6 +195,23 @@ def test_an_unknown_monitor_is_refused(invoke):
 def test_a_bad_monitor_on_a_run_is_reported_not_raised(capsys):
     assert cli.main(["run", "do something", "--monitor", "9", "-y"]) == 1
     assert "no monitor 9" in capsys.readouterr().err
+
+
+def test_a_dry_run_plans_without_the_sdk(invoke, monkeypatch, hermetic):
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    code, payload = invoke("run", "do something", "--dry-run")
+    assert code == 0 and payload["dry_run"] is True
+    assert payload["task"] == "do something" and payload["model"]
+    assert payload["max_steps"] == 30
+    assert payload["monitor"] == 2  # the primary one, in the middle
+    assert hermetic.calls == [] and hermetic.screen.grabs == []
+
+
+def test_a_dry_run_on_a_bad_monitor_is_json(invoke):
+    code, payload = invoke("run", "do something", "--dry-run",
+                           "--monitor", "9")
+    assert code == 1 and payload["ok"] is False
+    assert "no monitor 9" in payload["error"]
 
 
 def test_screen_lists_every_display(invoke):

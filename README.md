@@ -119,6 +119,7 @@ so treat it as the least proven part of the package.
 --model NAME     defaults to claude-opus-5
 -y               skip the confirmation
 -q               print only the final answer
+--dry-run        print the resolved plan without calling the model
 ```
 
 As a library:

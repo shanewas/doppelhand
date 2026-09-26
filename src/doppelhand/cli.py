@@ -142,6 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="which display: a number, 'primary' or 'all'")
     run.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
     run.add_argument("-q", "--quiet", action="store_true", help="only print the final answer")
+    run.add_argument("--dry-run", action="store_true",
+                     help="resolve the display and print the plan without calling the model")
 
     serve_cmd = commands.add_parser(
         "serve", help="hold a warm process open and answer commands over HTTP")
@@ -355,6 +357,8 @@ def cmd_install_skill(args) -> int:
 
 
 def cmd_run(args) -> int:
+    if args.dry_run:
+        return cmd_run_dry(args)
     try:
         import anthropic
     except ImportError:
@@ -409,6 +413,28 @@ def cmd_run(args) -> int:
 
     if answer:
         print(answer)
+    return 0
+
+
+def cmd_run_dry(args) -> int:
+    """The run without the model: resolve the display, print the plan, touch nothing.
+
+    Needs neither the Anthropic SDK nor a key, so CI and agent harnesses can
+    validate the whole invocation path short of spending a model turn.
+    """
+    from doppelhand import screen
+    from doppelhand.agent import DEFAULT_MODEL
+
+    try:
+        executor = Executor(max_edge=args.max_edge,
+                            monitor=_pick_monitor(screen.monitors(), args.monitor))
+    except DoppelhandError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
+    print(json.dumps({"ok": True, "dry_run": True, "task": args.task,
+                      "model": args.model or DEFAULT_MODEL,
+                      "max_steps": args.max_steps,
+                      **_space(executor, args)}))
     return 0
 
 
