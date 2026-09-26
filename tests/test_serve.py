@@ -1,15 +1,52 @@
 import http.client
 import json
 import threading
+import time
 
 import pytest
 
-from doppelhand import executor as executor_module, serve as serve_module
+from doppelhand import __version__, executor as executor_module, serve as serve_module
 from doppelhand.cli import ACTIONS
 from doppelhand.serve import TOKEN_HEADER, Server, to_argv
 from fakes import FakeKeyboard, FakeScreen, three_monitors
 
 TOKEN = "test-token"
+
+
+@pytest.fixture
+def headless_entrypoint(monkeypatch, tmp_path):
+    """The serve() entrypoint without a desktop: no Win32, no real capture."""
+    monkeypatch.setenv("DOPPELHAND_HOME", str(tmp_path))
+    monkeypatch.setattr("doppelhand.screen.attach_input_desktop", lambda: True)
+    closed = {}
+
+    class FakeFrames:
+        def close(self):
+            closed["frames"] = True
+
+    monkeypatch.setattr("doppelhand.duplication.FrameSource", FakeFrames)
+    return tmp_path, closed
+
+
+def wait_for(path, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def wait_healthy(port, timeout=5.0):
+    """The token file lands before serve_forever accepts; wait for answers."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return call(port, "/health")
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 @pytest.fixture
@@ -170,3 +207,52 @@ def test_stopping_waits_for_the_action_in_flight(running):
 def test_every_action_knows_its_positional_arguments():
     """A missing entry would silently turn a positional into an unknown flag."""
     assert set(serve_module.POSITIONALS) == set(ACTIONS)
+
+
+def test_serve_writes_then_removes_the_token_file(headless_entrypoint):
+    tmp_path, closed = headless_entrypoint
+    note = tmp_path / "doppelhand" / "serve.json"
+    worker = threading.Thread(
+        target=lambda: serve_module.serve(0, token=TOKEN, quiet=True),
+        daemon=True)
+    worker.start()
+    assert wait_for(note), "serve() never wrote its token file"
+
+    details = json.loads(note.read_text())
+    assert details == {"port": details["port"], "token": TOKEN,
+                       "version": __version__}
+    assert wait_healthy(details["port"])[0] == 200
+
+    assert call(details["port"], "/stop", method="POST")[0] == 200
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert not note.exists(), "stale token file would point at a dead server"
+    assert closed.get("frames") is True
+
+
+def test_serve_announces_where_it_listens(headless_entrypoint, capsys):
+    tmp_path, _closed = headless_entrypoint
+    note = tmp_path / "doppelhand" / "serve.json"
+    worker = threading.Thread(
+        target=lambda: serve_module.serve(0, token=TOKEN, quiet=False),
+        daemon=True)
+    worker.start()
+    assert wait_for(note), "serve() never wrote its token file"
+
+    port = json.loads(note.read_text())["port"]
+    wait_healthy(port)
+    call(port, "/stop", method="POST")
+    worker.join(timeout=10)
+    out = capsys.readouterr().out
+    assert f"doppelhand {__version__} listening on http://127.0.0.1:{port}" in out
+    assert str(note) in out
+
+
+def test_a_reset_connection_logs_no_traceback(running, capsys):
+    """Clients RST idle keep-alive connections; the request already answered."""
+    _port, _, server = running
+    try:
+        raise ConnectionResetError(10054, "forcibly closed")
+    except ConnectionResetError:
+        server.handle_error(None, ("127.0.0.1", 1))
+    assert "Traceback" not in capsys.readouterr().err

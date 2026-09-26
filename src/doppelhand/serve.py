@@ -20,6 +20,7 @@ from __future__ import annotations
 import hmac
 import json
 import secrets
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -180,6 +181,15 @@ class Server(ThreadingHTTPServer):
                 self.frames.close()
                 self.frames = None
         super().server_close()
+
+    def handle_error(self, request, client_address):
+        # HTTP/1.1 keep-alive plus a client that hangs up (curl and
+        # Invoke-WebRequest both RST a connection they are done with) lands
+        # here as a reset on the next readline. The request already answered;
+        # there is nothing to fix, so stay quiet instead of dumping a traceback.
+        if isinstance(sys.exc_info()[1], ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
 
 
 def serve(port: int = 0, token: str | None = None, quiet: bool = False) -> int:
